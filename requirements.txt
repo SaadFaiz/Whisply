@@ -1,0 +1,6 @@
+fastapi==0.104.1
+uvicorn[standard]==0.23.2
+faster-whisper==0.10.0
+torch==2.1.0
+ffmpeg-python==0.2.0
+websockets==11.0.3

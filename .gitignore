@@ -1,0 +1,46 @@
+# dependencies
+frontend/node_modules/
+
+# Yarn Plug'n'Play files
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing coverage
+coverage/
+
+# Next.js build output
+frontend/.next/
+out/
+
+# production build output
+build/
+
+# misc files
+.DS_Store
+*.pem
+
+# debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# environment variables
+.env*
+
+# Vercel deployment config
+.vercel/
+
+# TypeScript build info
+*.tsbuildinfo
+next-env.d.ts
+
+# editor and system files
+.history/
+.vscode/
+__pycache__/
