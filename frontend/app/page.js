@@ -8,7 +8,7 @@ export default function VideoPlayer() {
   const videoRef = useRef(null);
   const [status, setStatus] = useState('disconnected');
   const [subtitles, setSubtitles] = useState([]);
-  const [streamUrl, setStreamUrl] = useState('https://srv311.shiplings.cyou/aes/vxBIT_H-QjrZv3DIw5COUw/1752557561/storage2/movies/0245429-spirited-away-2001-1648136546/ebae5c4cf0f1336f73e3f50690f4ebae.mp4/index.m3u8');
+  const [streamUrl, setStreamUrl] = useState('https://srv265.bilingly.cyou/aes/0/c541fbdab16d5976056985f470c8c2889c8d3761d3f44a2a0e504f57c68ebae4/sZHAQHPAHuwltvAGgc9VSw/1752858001/storage5/movies/0347149-howls-moving-castle-2004-1600380158/f2bb4134e29f1777182435839e20af5f.mp4/index.m3u8');
   const [VideoLanguage, setVideoLanguage] = useState("en");
   const wsRef = useRef(null);
   const playerRef = useRef(null);
@@ -95,9 +95,9 @@ export default function VideoPlayer() {
       wsRef.current.send(VideoLanguage);
     };
     wsRef.current.onmessage = (event) => {
-      if (countRef.current === 0) {
-        initializePlayer();
-        countRef.current++;
+      if(event.data === "start"){
+        initializePlayer()
+        return;
       }
       try {
         const data = JSON.parse(event.data);
@@ -152,13 +152,6 @@ export default function VideoPlayer() {
           type="text"
           value={VideoLanguage}
           onChange={(e) => setVideoLanguage(e.target.value)}
-          className="w-full p-2 bg-gray-700 rounded mb-2"
-        />
-        <label className="block mb-2">transcription model</label>
-        <input
-          type="text"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
           className="w-full p-2 bg-gray-700 rounded mb-2"
         />
         <div className="text-sm text-gray-400">

@@ -1,13 +1,19 @@
-import os
 import asyncio
 import io
-import subprocess
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
+from silero_vad import (load_silero_vad,
+                        read_audio,
+                        get_speech_timestamps,)
 import torch
 import wave
+from speech_exist import speech_exist
+import whisperx
+import soundfile as sf
+import numpy as np
+
 
 app = FastAPI()
 app.add_middleware(
@@ -21,27 +27,34 @@ app.add_middleware(
 # ----------------------
 # Configuration
 # ----------------------
-CHUNK_DURATION = 8          # seconds per chunk
+CHUNK_DURATION = 50          # seconds per chunk
 OVERLAP = 1                 # seconds overlap between chunks
 SAMPLE_RATE = 16000         # audio sample rate
 BYTES_PER_SAMPLE = 2        # 16-bit PCM
 CHANNELS = 1
 QUEUE_MAXSIZE = 5           # queue depth for backpressure
-MODEL_NAME = "medium.en"       # large, large-v2, medium, small, etc.
+MODEL_NAME = "turbo"       # large, large-v2, medium, small, etc.
 COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "int8"
-BEAM_SIZE = 10               # higher beam for accuracy
-WORDS_PER_LINE = 10          # words per subtitle line
-
+BEAM_SIZE = 5               # higher beam for accuracy
+WORDS_PER_LINE = 15          # words per subtitle line
+OPSET_VERSION=16
+USE_ONNX=False
+FRAME_SIZE = 512 if SAMPLE_RATE == 16000 else 256
 # ----------------------
-# Load Whisper model
+# Load Whisper and Silero models
 # ----------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = WhisperModel(
+WhisperModel = WhisperModel(
     MODEL_NAME,
     device=device,
     compute_type=COMPUTE_TYPE
     )
-print("Model loaded!")
+print("WhisperModel loaded!")
+SileroModel = load_silero_vad(onnx=USE_ONNX)
+print("SileroModel loaded!")
+model_a, metadata = whisperx.load_align_model(language_code="en", device=device)
+print("whisperX loaded!")
+
 # ----------------------
 # Audio stream reader
 # ----------------------
@@ -71,7 +84,7 @@ async def audio_stream_reader(stream_url: str, queue: asyncio.Queue):
         global_time = 0.0
 
         while True:
-            data = await process.stdout.read(4096)
+            data = await process.stdout.read(chunk_size)
             if not data:
                 break
             buffer += data
@@ -96,6 +109,7 @@ async def audio_stream_reader(stream_url: str, queue: asyncio.Queue):
 # ----------------------
 async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLanguage: str):
     sent_buffer = []  # keep last segments for deduplication
+    transcriptionStarted = False
 
     while True:
         item = await queue.get()
@@ -111,31 +125,75 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
         audio_buf.seek(0)
 
         try:
-            segments, _ = model.transcribe(
+            wav = read_audio(audio_buf, sampling_rate=SAMPLE_RATE)
+            speech_timestamps = get_speech_timestamps(wav, SileroModel, sampling_rate=SAMPLE_RATE)
+            print("speech_timestamps : " , speech_timestamps);
+            hasTimestamp = None
+            if (len(speech_timestamps) > 0) : hasTimestamp = 1 
+            else : hasTimestamp = 0
+            highestProb = 0;
+            for i in range(0, len(wav), FRAME_SIZE):
+                frame = wav[i : i + FRAME_SIZE]
+                if(len(frame) < FRAME_SIZE):
+                    break
+                prob = SileroModel(frame, SAMPLE_RATE).item()
+                if (prob > highestProb) : highestProb = prob
+            audio_buf.seek(0)
+            segments, _ = WhisperModel.transcribe(
                 audio_buf,
                 language=VideoLanguage,
                 vad_filter=False,
                 beam_size=BEAM_SIZE,
                 word_timestamps=True
             )
+            if(transcriptionStarted == False): 
+                await websocket.send_text("start")
+                transcriptionStarted = True
             words = []
+            filteredSegments = []
             for seg in segments:
-                # filter by confidence
-                if seg.no_speech_prob > 0.8 or seg.avg_logprob < -3.0 or seg.compression_ratio > 3.0:
+                print(f"[DEBUG] Text: '{seg.text}'")
+                
+                if (highestProb < 0.1) : highestProb = 0.05
+                sample = {
+                    "avg_logprob":   seg.avg_logprob,
+                    "has_timestamp":  hasTimestamp,
+                    "speech_prob":    highestProb
+                }
+                print(sample)
+                SpeechExist = speech_exist(sample)
+                print("have Speech : " ,SpeechExist)
+                if(SpeechExist == "N"):
                     continue
-                for w in getattr(seg, 'words', []):
-                    word_text = w.word.strip()
-                    if not word_text:
-                        continue
-                    word_start = (w.start or seg.start) + start_time
-                    word_end = (w.end or (w.start or seg.start) + 0.5) + start_time
-                    key = (word_text.lower(), round(word_start, 2))
-                    # dedupe
-                    if key in sent_buffer:
-                        continue
-                    sent_buffer.append(key)
-                    words.append({'text': word_text, 'start': word_start, 'end': word_end})
-            # send grouped lines
+                filteredSegments.append({
+                    "start": float(seg.start),
+                    "end": float(seg.end),
+                    "text": seg.text.strip()
+                })
+            if(SpeechExist == "N"):
+                continue
+            audio_buf.seek(0)
+            audio_np, sr = sf.read(audio_buf)
+            audio_tensor = torch.tensor(audio_np, device=device).float()
+            alignedResults = whisperx.align(filteredSegments, model_a, metadata, audio_tensor, device, return_char_alignments=False)
+            alignedSegments = (list(alignedResults['segments']));
+            segmentStart = getattr(alignedSegments, 'start', None)
+            print("segment Start : ",segmentStart)
+            print("AligneSegments : ",alignedSegments)
+            for seg in alignedSegments:
+                for w in seg['words']:
+                        word_text = w["word"].strip()
+                        if not word_text:
+                            continue
+                        word_start = (w["start"] or seg['start']) + start_time
+                        word_end = (w["end"] or (w["start"] or seg['start']) + 0.5) + start_time
+                        key = (word_text.lower(), round(word_start, 2))
+                        # dedupe
+                        if key in sent_buffer:
+                            continue
+                        sent_buffer.append(key)
+                        words.append({'text': word_text, 'start': word_start, 'end': word_end})
+                # send grouped lines
             line, line_start = [], None
             for w in words:
                 if not line:
