@@ -1,7 +1,8 @@
 import joblib
 import pandas as pd
 
-model = joblib.load("./pretrained_whisply_models/Whisply_model_V1.pkl")
+model = joblib.load("backend2/pretrained_whisply_models/Whisply_model_V1.pkl")
+
 
 # ─── Prediction function for new samples ─────────────────────────────────────
 def speech_exist(sample_dict):
