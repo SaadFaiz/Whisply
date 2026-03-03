@@ -1,6 +1,5 @@
 # dependencies
-frontend/node_modules/
-
+electron/my-electron-app/node_modules/
 # Yarn Plug'n'Play files
 .pnp
 .pnp.*
@@ -49,3 +48,14 @@ __pycache__/
 
 
 backend2
+client
+server/pretrained_whisply_models
+server/main2.py
+server/requirements.txt
+server/saveMain.py
+server/speech_exist.py
+server/tempCodeRunnerFile.py
+server/WhisplyModelTraining.py
+server/worker.py
+server/server.py
+server/index.html

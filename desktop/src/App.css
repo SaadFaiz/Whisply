@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@font-face {
+    font-family: 'Arial';
+    font-weight: normal;
+    font-style: normal;
+    src: url(./fonts/arial/ARIALBD\ 1.TTF) format('truetype');
+}
+@font-face {
+    font-family: 'Asap Condensed';
+    font-weight: normal;
+    font-style: normal;
+    src: url(./fonts/Asap_Condensed/AsapCondensed-Medium.ttf) format('truetype');
+}
+@theme {
+  --font-arial: "Arial", sans-serif;
+  --font-asap-condensed: "Asap Condensed", sans-serif;
+}
+.vjs-tech{
+    height: 100% !important;
+    width: 100% !important;
+}
+.video-js{
+    height: 100% !important;
+    width: 100% !important;
+    background-color: transparent !important;
+}
+.root{
+    max-height: 100vh;
+    width: 100vw;
+}
