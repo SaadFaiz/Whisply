@@ -72,7 +72,22 @@ export default function VideoPlayer() {
         
       }
       console.log("received subtitle : ",data)
-      setSubtitles((prev) => [...prev, data]);
+      switch (data.route) {
+        case "transcription":
+          setSubtitles((prev) => [...prev, data.content]);
+          break;
+        case "translation":
+          setSubtitles((prev) => {
+            console.log("here is the prev" ,prev);
+            const idx = prev.findIndex((l) => l.id === data.content.id);
+            if (idx !== -1) {
+              prev[idx].translated_text = data.content.translated_text;
+              return [...prev];
+            }
+            return prev;
+          });
+          break;
+      }
     };
     
     wsRef.current.onerror = () => setStatus("error");

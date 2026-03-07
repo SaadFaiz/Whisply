@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 import { secondsToHMS } from "../utils/secondToHMS";
-import sleep from "../utils/sleep";
 export const PlayerUi = (props) => {
     const [isHovered, setIsHovered] = useState(1);
     
     const [currentTime, setCurrentTime] = useState("");
     const [currentSubtitle, setCurrentSubtitle] = useState({
+        id: null,
         chunk: 0,
         start: 0,
         end: 0,
@@ -50,7 +50,7 @@ export const PlayerUi = (props) => {
       setCurrentTime(`${durationSplited.hours > 0 ? Math.floor(hours) + ":" : ""}${minutes < 10 ? "0" + Math.floor(minutes) : Math.floor(minutes)}:${seconds < 10 ? "0" + Math.floor(seconds) : Math.floor(seconds)}`);
       if(currentTime > currentSubtitle.start && currentTime < currentSubtitle.end) return;
       const index = props.subtitles.find((subtitle) => subtitle.start <= props.videoData.currentTime && subtitle.end >= props.videoData.currentTime)
-      index ? setCurrentSubtitle(index) : setCurrentSubtitle({chunk: 0, start: 0, end: 0, text: ""});
+      index ? setCurrentSubtitle(index) : setCurrentSubtitle({id: null,chunk: 0, start: 0, end: 0, text: "", translatedText: ""});
     }, [props.videoData.currentTime]);
     const playButtonUiHandler = async () => {
         await props.playButtonHandler();
@@ -118,8 +118,9 @@ export const PlayerUi = (props) => {
       </div>
       {
         currentSubtitle && (
-          <div className="absolute bottom-[8vh] w-[80%] text-center h-fit left-1/2 -translate-x-1/2">
+          <div className="absolute flex flex-col gap-1 bottom-[8vh] w-[80%] text-center h-fit left-1/2 -translate-x-1/2">
             <p className="text-white text-[1.8vw] bg-black/50 font-arial">{currentSubtitle.text}</p>
+            {currentSubtitle.translated_text && <p className="text-white text-[1.5vw] bg-black/50 font-arial">{currentSubtitle.translated_text}</p>}
           </div>
         ) 
       }

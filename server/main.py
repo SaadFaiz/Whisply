@@ -1,9 +1,11 @@
 import asyncio
+from sqlalchemy import case
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from collections import deque
 import torch
 import time
@@ -29,7 +31,7 @@ QUEUE_MAXSIZE = 5
 MODEL_NAME = "turbo"        # Whisper model variant
 COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "int8"
 BEAM_SIZE = 5
-WORDS_PER_LINE = 17 * 2 #17 word per each line. 2 lines max per language
+WORDS_PER_LINE = 15 * 2 #17 word per each line. 2 lines max per language
 OPSET_VERSION = 16
 USE_ONNX = False
 FRAME_SIZE = 512 if SAMPLE_RATE == 16000 else 256
@@ -39,6 +41,11 @@ SILENCE_DURATION = 2.0       # seconds of silence to trigger transcription
 VAD_CHUNK_MS = 100           # process audio in 100ms chunks for VAD
 VAD_THRESHOLD = 0.3          # speech probability threshold
 MIN_SPEECH_DURATION = 0.1    # minimum seconds of speech to transcribe
+
+# translation configuration
+TRANSLATION_MODEL_NAME = "translategemma:4b"
+TGT_LANG = "arb_Arab"
+SRC_LANG = "eng_Latn" 
 
 # ----------------------
 # Load models
@@ -59,6 +66,9 @@ print("WhisperModel loaded!")
 SileroModel = load_silero_vad(onnx=USE_ONNX).to(device)
 print("SileroModel loaded!")
 
+tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
+model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M").to(device)
+print("Translation Model loaded!")
 endloading = time.perf_counter()
 
 print(f"Models loaded in {endloading - startloading:.2f} seconds")
@@ -249,14 +259,37 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
 async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLanguage: str):
     transcriptionStarted = False
     lines = []
-    async def send_ws_line(line):
+
+    counter = 0
+
+    async def generate_line_id():
+        nonlocal counter
+        counter += 1
+        line_id = (int(time.time() * 1000) + counter).to_bytes(8, byteorder='big').hex()
+        return line_id 
         
+    async def add_id_to_line(line):
+        if 'id' not in line or line['id'] is None:
+            line['id'] = await generate_line_id()
+        return line
+        
+    async def send_ws(route, content):
         try:
-            lines.append(line)
-            await websocket.send_json(line)
-            print(f"[WebSocket] Sent message: {line}")
+            match route: 
+                case "translation":
+                    translation = {
+                        'id': content['id'],
+                        'translated_text': content['translated_text']
+                    }
+                    await websocket.send_json({"route": "translation", "content": translation})
+                case "transcription":
+                    line = await add_id_to_line(content)
+                    lines.append(line)
+                    await websocket.send_json({"route": "transcription", "content": line})
+                    print(f"[WebSocket] Sent message: {line}")
         except Exception as e:
             print(f"[Error] Failed to send WebSocket message: {e}")
+            
     while True:
         try:
             q1 = time.perf_counter()
@@ -345,7 +378,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                     'end': w.end + start_time, 
                                     'text': ' '.join(segWords)
                                 }
-                                await send_ws_line(lineSent)
+                                await send_ws("transcription",lineSent)
                                 await asyncio.sleep(0)
                                 s1 = time.perf_counter()
                                 print(f"[Debug] Frist line sent in {s1 - q1:.6f}s")
@@ -362,7 +395,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                     'end': w.end + start_time, 
                                     'text': ' '.join(segWords)
                                 }
-                                await send_ws_line(lineSent)
+                                await send_ws("transcription",lineSent)
                                 await asyncio.sleep(0)
                                 print("[Debug] Line sent")
                                 segWords = []
@@ -381,7 +414,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                 'end':   flush_end_word.end + start_time,
                                 'text':  ' '.join(w for w in segWords if w)
                             }
-                            await send_ws_line(lineSent)
+                            await send_ws("transcription",lineSent)
                             await asyncio.sleep(0)
                             print("[Debug] Flushed remaining segWords after word loop")
                         except Exception as e:
@@ -412,7 +445,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                         'end':   w.end + start_time,
                                         'text':  ' '.join(segWords)
                                     }
-                                    await send_ws_line(lineSent)
+                                    await send_ws("transcription",lineSent)
                                     await asyncio.sleep(0)
                                     print("[Debug] Flushed remaining line (post-loop, punctuation)")
                                     segWords = []
@@ -425,7 +458,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                         'end':   w.end + start_time,
                                         'text':  ' '.join(segWords)
                                     }
-                                    await send_ws_line(lineSent)
+                                    await send_ws("transcription",lineSent)
                                     await asyncio.sleep(0)
                                     print("[Debug] Flushed remaining line (post-loop, length)")
                                     segWords = []
@@ -442,15 +475,40 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                     'end':   flush_end_word.end + start_time,
                                     'text':  ' '.join(w for w in segWords if w)
                                 }
-                                await send_ws_line(lineSent)
+                                await send_ws("transcription",lineSent)
                                 await asyncio.sleep(0)
                                 print("[Debug] Flushed tail of remaining line (post-loop)")
                             except Exception as e:
                                 print(f"[Error] Failed flushing tail of remaining line for chunk {chunk_index}: {e}")
                     except Exception as e:
                         print(f"[Error] Failed flushing remaining line for chunk {chunk_index}: {e}")
-                # ────────────────────────────────────────────────────────────────
                 print(f"lines for chunk {chunk_index}: {lines}")
+
+                # ────────────────────── TRANSLATION LAYER ───────────────────────
+                try:
+                    for line in lines:
+                        try:
+                            inputs = tokenizer(line['text'], return_tensors="pt").to(device)
+                            translated_tokens = model.generate(
+                                **inputs,
+                                forced_bos_token_id=tokenizer.convert_tokens_to_ids(TGT_LANG)
+                            )
+                            translated_text = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+                            if translated_text:
+                                translation = {
+                                    'id': line['id'],
+                                    'translated_text': translated_text
+                                }
+                                await send_ws("translation", translation)
+                                await asyncio.sleep(0)
+                                print(f"[Debug] Translation sent for line in chunk {chunk_index}")
+                        except Exception as e:
+                            print(f"[Error] Translation failed for line in chunk {chunk_index}: {e}")
+                            translated_text = ""
+                except Exception as e:
+                    print(f"[Error] Failed to process translation for chunk {chunk_index}: {e}")
+
+
             except Exception as e:
                 print(f"[Error] Failed to process aligned segments for chunk {chunk_index}: {e}")
             sEnd = time.perf_counter()
@@ -467,7 +525,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
         except Exception as e:
             print(f"[Transcription error in chunk {chunk_index}]: {e}")
 
-# async def translation_worker(segment: str):
+#async def translation_worker(segment: str):
 #     payload = {
 #         "model": "translategemma:4b",
 #         "prompt": f"Translate the following text to Arabic and output only the trasnlated Arabic text:\n\n{segment['text']}\n\n",
