@@ -1,12 +1,13 @@
 import asyncio
-from sqlalchemy import case
 import uvicorn
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 from silero_vad import load_silero_vad
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 from collections import deque
+from google import genai
+from dotenv import load_dotenv
+import os
 import torch
 import time
 import numpy
@@ -21,6 +22,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
 # ----------------------
 # Configuration
 # ----------------------
@@ -28,13 +31,16 @@ SAMPLE_RATE = 16000          # audio sample rate
 BYTES_PER_SAMPLE = 4         
 CHANNELS = 1
 QUEUE_MAXSIZE = 5
-MODEL_NAME = "turbo"        # Whisper model variant
-COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "int8"
-BEAM_SIZE = 5
 WORDS_PER_LINE = 15 * 2 #17 word per each line. 2 lines max per language
 OPSET_VERSION = 16
 USE_ONNX = False
 FRAME_SIZE = 512 if SAMPLE_RATE == 16000 else 256
+
+# ASR Configuration
+MODEL_NAME = "turbo"        # Whisper model variant
+COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "int8"
+BEAM_SIZE = 5
+
 
 # VAD Configuration
 SILENCE_DURATION = 2.0       # seconds of silence to trigger transcription
@@ -43,35 +49,32 @@ VAD_THRESHOLD = 0.3          # speech probability threshold
 MIN_SPEECH_DURATION = 0.1    # minimum seconds of speech to transcribe
 
 # translation configuration
-TRANSLATION_MODEL_NAME = "translategemma:4b"
+TRANSLATION_MODEL_NAME = "gemma-3-27b-it"
 TGT_LANG = "arb_Arab"
 SRC_LANG = "eng_Latn" 
 
+# ENV variables
+load_dotenv()
+GOOGLEAPIKEY = os.getenv("GOOGLE_API_KEY")
 # ----------------------
 # Load models
 # ----------------------
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 print("loading start")
-startloading = time.perf_counter()
 
 whisper_model = WhisperModel(
     MODEL_NAME,
     device=device,
     compute_type=COMPUTE_TYPE
 )
-whisperLoaded = True
 print("WhisperModel loaded!")
 
 SileroModel = load_silero_vad(onnx=USE_ONNX).to(device)
 print("SileroModel loaded!")
 
-tokenizer = AutoTokenizer.from_pretrained("facebook/nllb-200-distilled-600M")
-model = AutoModelForSeq2SeqLM.from_pretrained("facebook/nllb-200-distilled-600M").to(device)
-print("Translation Model loaded!")
-endloading = time.perf_counter()
-
-print(f"Models loaded in {endloading - startloading:.2f} seconds")
+GenaiClient = genai.Client(api_key=GOOGLEAPIKEY)
+print("Client loaded!")
 
 # ----------------------
 # Audio stream reader with VAD-based chunking
@@ -80,8 +83,6 @@ print(f"Models loaded in {endloading - startloading:.2f} seconds")
 async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal: asyncio.Event, queue_signal: asyncio.Queue):
 
     async def start_ffmpeg_process(file_path, start_time=0.0):
-        t0 = time.perf_counter()
-
         print("Starting FFmpeg process (native asyncio)...")
 
         cmd = [
@@ -103,9 +104,6 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL
         )
-
-        t1 = time.perf_counter()
-        print(f"[TIMER] FFmpeg spawn took: {t1 - t0:.4f}s")
 
         return process
 
@@ -131,11 +129,6 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
             print("[Reader] Reading audio stream...")
 
             while True:
-                loop_t0 = time.perf_counter()
-
-                startReading = time.perf_counter()
-
-                signal_t0 = time.perf_counter()
                 if event_signal.is_set():
                     signal_content = await queue_signal.get()
                     if signal_content["signal"] == "change_timestamp":
@@ -143,26 +136,16 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
                         signal_content["signal"] = None
                         event_signal.clear()
                         return
-                signal_t1 = time.perf_counter()
 
-                readData_t0 = time.perf_counter()
                 data = await process.stdout.read(vad_chunk_size * 10)
-                readData_t1 = time.perf_counter()
 
                 if not data:
                     if len(accumulated_audio) > 0:
-                        q_t0 = time.perf_counter()
-
-                        print("[DEBUG] : queue got something line 117")
                         await queue.put((
                             chunk_index,
                             accumulated_audio,
                             global_time - len(accumulated_audio) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
                         ))
-
-                        q_t1 = time.perf_counter()
-                        print(f"[TIMER] Final queue.put took: {q_t1 - q_t0:.4f}s")
-
                         chunk_index += 1
 
                     print("[Reader] No data, retrying in 5s...")
@@ -171,28 +154,20 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
 
                 buffer += data
 
-                buffer_t0 = time.perf_counter()
-
                 while len(buffer) >= vad_chunk_size:
                     vad_chunk = buffer[:vad_chunk_size]
                     buffer = buffer[vad_chunk_size:]
 
                     pre_buffer.extend(vad_chunk)
 
-                    np_t0 = time.perf_counter()
                     audio_numpy = numpy.frombuffer(vad_chunk, dtype=numpy.float32).copy()
-                    np_t1 = time.perf_counter()
 
                     if len(audio_numpy) != vad_frame_samples:
                         continue
 
-                    torch_t0 = time.perf_counter()
                     audio_tensor = torch.from_numpy(audio_numpy).to(device)
-                    torch_t1 = time.perf_counter()
 
-                    vad_t0 = time.perf_counter()
                     speech_prob = SileroModel(audio_tensor, SAMPLE_RATE).item()
-                    vad_t1 = time.perf_counter()
 
                     chunk_duration = len(vad_chunk) / (SAMPLE_RATE * BYTES_PER_SAMPLE)
 
@@ -215,15 +190,8 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
 
                                 if speech_duration >= MIN_SPEECH_DURATION:
                                     start_time = global_time - speech_duration
-
-                                    q_t0 = time.perf_counter()
-
                                     print(f"[VAD] Sending chunk #{chunk_index}")
                                     await queue.put((chunk_index, accumulated_audio, start_time))
-
-                                    q_t1 = time.perf_counter()
-                                    print(f"[TIMER] queue.put took: {q_t1 - loop_t0:.4f}s")
-
                                     chunk_index += 1
                                 else:
                                     print(f"[VAD] Speech too short ({speech_duration:.2f}s)")
@@ -234,13 +202,6 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
 
                     global_time += chunk_duration
 
-                buffer_t1 = time.perf_counter()
-
-                endReading = time.perf_counter()
-
-                loop_t1 = time.perf_counter()
-
-
         except asyncio.CancelledError:
             print("[Reader] Cancelled.")
             if process.returncode is None:
@@ -250,7 +211,6 @@ async def audio_stream_reader(file_path: str, queue: asyncio.Queue, event_signal
         finally:
             if process.returncode is None:
                 process.kill()
-            print("[DEBUG] : queue got something line 189")
             await queue.put(None)
 
 # ----------------------
@@ -292,10 +252,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
             
     while True:
         try:
-            q1 = time.perf_counter()
             item = await queue.get()
-            q2 = time.perf_counter()
-            print("[Debug] took ", q2 - q1, " to get audio from queue")
         except Exception as e:
             print(f"[Error] Failed to get item from queue: {e}")
             continue
@@ -314,16 +271,13 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
 
         try:
             audio_numpy = numpy.frombuffer(chunk_bytes, dtype=numpy.float32).copy()
-
             print("[Debug] WAV buffer created")
         except Exception as e:
             print(f"[Error] Failed to create WAV buffer: {e}")
 
         try:
-            start_processing = time.perf_counter()
-
+            # ── Whisper transcription ──
             try:
-                start_whisper = time.perf_counter()
                 segments, _ = whisper_model.transcribe(
                     audio_numpy,
                     language=VideoLanguage,
@@ -331,12 +285,11 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                     beam_size=BEAM_SIZE,
                     word_timestamps=True
                 )
-                end_whisper = time.perf_counter()
-                print(f"[Debug] Chunk {chunk_index} Whisper transcription done in {end_whisper - start_whisper:.6f}s")
             except Exception as e:
                 print(f"[Error] Whisper transcription failed for chunk {chunk_index}: {e}")
                 segments = []
                 
+            # ── WS "start" signal ──
             try:
                 if not transcriptionStarted:
                     await websocket.send_text("start")
@@ -345,10 +298,7 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
             except Exception as e:
                 print(f"[Error] Failed to send start signal: {e}")
 
-            words = []
-
-            cStart = time.perf_counter()
-            sStart = time.perf_counter()
+            # ── Segment / line building  ──
             try:
                 line = {
                     'chunk': chunk_index,
@@ -380,8 +330,6 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                 }
                                 await send_ws("transcription",lineSent)
                                 await asyncio.sleep(0)
-                                s1 = time.perf_counter()
-                                print(f"[Debug] Frist line sent in {s1 - q1:.6f}s")
                                 print("[Debug] Line sent")
                                 segWords = []
                                 lineWordStartIndex = i + 1
@@ -482,18 +430,20 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                 print(f"[Error] Failed flushing tail of remaining line for chunk {chunk_index}: {e}")
                     except Exception as e:
                         print(f"[Error] Failed flushing remaining line for chunk {chunk_index}: {e}")
+
                 print(f"lines for chunk {chunk_index}: {lines}")
 
                 # ────────────────────── TRANSLATION LAYER ───────────────────────
                 try:
                     for line in lines:
                         try:
-                            inputs = tokenizer(line['text'], return_tensors="pt").to(device)
-                            translated_tokens = model.generate(
-                                **inputs,
-                                forced_bos_token_id=tokenizer.convert_tokens_to_ids(TGT_LANG)
+                            prompt = f"""You are an expert {SRC_LANG} to {TGT_LANG} subtitle translator. Translate the "Current Line" into natural {TGT_LANG}. Rules:1. Output strictly the {TGT_LANG} translation of the Current Line and nothing else.2. Use the "Previous Line" strictly to understand context, pronouns, and gender, but DO NOT translate it.3. If the Current Line is incomplete, translate it as an incomplete thought.Previous Line: "{lines[lines.index(line)-1]['text'] if lines.index(line) > 0 else ''}"Current Line: "{line['text']}"next Line: "{lines[lines.index(line)+1]['text'] if lines.index(line) < len(lines)-1 else ''}"{TGT_LANG} translation:"""
+        
+                            response = GenaiClient.models.generate_content(
+                                model=TRANSLATION_MODEL_NAME,
+                                contents=prompt
                             )
-                            translated_text = tokenizer.decode(translated_tokens[0], skip_special_tokens=True)
+                            translated_text = response.text.strip()
                             if translated_text:
                                 translation = {
                                     'id': line['id'],
@@ -504,36 +454,16 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                 print(f"[Debug] Translation sent for line in chunk {chunk_index}")
                         except Exception as e:
                             print(f"[Error] Translation failed for line in chunk {chunk_index}: {e}")
-                            translated_text = ""
+
                 except Exception as e:
                     print(f"[Error] Failed to process translation for chunk {chunk_index}: {e}")
 
-
             except Exception as e:
                 print(f"[Error] Failed to process aligned segments for chunk {chunk_index}: {e}")
-            sEnd = time.perf_counter()
-            print(f"[Debug] Chunk {chunk_index} processing done in {sEnd - sStart:.6f}s")
-            wStart = time.perf_counter()
-            
-            wEnd = time.perf_counter()
-            print(f"[Debug] Chunk {chunk_index} line grouping done in {wEnd - wStart:.6f}s")
-            cEnd = time.perf_counter()
-            print(f"[Debug] Chunk {chunk_index} total processing done in {cEnd - cStart:.6f}s")
-            end_processing = time.perf_counter()
-            print(f"[Debug] Chunk {chunk_index} total processing time: {end_processing - start_processing:.6f}s")
 
         except Exception as e:
             print(f"[Transcription error in chunk {chunk_index}]: {e}")
 
-#async def translation_worker(segment: str):
-#     payload = {
-#         "model": "translategemma:4b",
-#         "prompt": f"Translate the following text to Arabic and output only the trasnlated Arabic text:\n\n{segment['text']}\n\n",
-#         "stream": False
-#     }
-#     response =requests.post("http://localhost:11434/api/generate", json=payload)
-#     TranslatedSegment = response.json().get("response")
-#     return TranslatedSegment
 # ----------------------
 # WebSocket endpoint
 # ----------------------
