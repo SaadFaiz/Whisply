@@ -4,7 +4,7 @@
     font-family: 'Arial';
     font-weight: normal;
     font-style: normal;
-    src: url(./fonts/arial/ARIALBD\ 1.TTF) format('truetype');
+    src: url(./fonts/arial/ARIALBD.TTF) format('truetype');
 }
 @font-face {
     font-family: 'Asap Condensed';
@@ -12,9 +12,16 @@
     font-style: normal;
     src: url(./fonts/Asap_Condensed/AsapCondensed-Medium.ttf) format('truetype');
 }
+@font-face {
+    font-family: 'Cairo';
+    font-weight: normal;
+    font-style: normal;
+    src: url(./fonts/Cairo/Cairo-SemiBold.ttf) format('truetype');
+}
 @theme {
   --font-arial: "Arial", sans-serif;
   --font-asap-condensed: "Asap Condensed", sans-serif;
+  --font-cairo: "Cairo", sans-serif;
 }
 .vjs-tech{
     height: 100% !important;

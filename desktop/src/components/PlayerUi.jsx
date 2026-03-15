@@ -118,9 +118,9 @@ export const PlayerUi = (props) => {
       </div>
       {
         currentSubtitle && (
-          <div className="absolute flex flex-col gap-1 bottom-[8vh] w-[80%] text-center h-fit left-1/2 -translate-x-1/2">
+          <div className="absolute flex flex-col gap-5 bottom-[5vh] w-[80%] text-center h-fit left-1/2 -translate-x-1/2">
             <p className="text-white text-[1.8vw] bg-black/50 font-arial">{currentSubtitle.text}</p>
-            {currentSubtitle.translated_text && <p className="text-white text-[1.5vw] bg-black/50 font-arial">{currentSubtitle.translated_text}</p>}
+            {currentSubtitle.translated_text && <p className="text-white text-[1.5vw] bg-black/50 font-cairo">{currentSubtitle.translated_text}</p>}
           </div>
         ) 
       }

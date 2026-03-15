@@ -435,10 +435,11 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
 
                 # ────────────────────── TRANSLATION LAYER ───────────────────────
                 try:
+                    retry_after = None
                     for line in lines:
                         try:
                             prompt = f"""You are an expert {SRC_LANG} to {TGT_LANG} subtitle translator. Translate the "Current Line" into natural {TGT_LANG}. Rules:1. Output strictly the {TGT_LANG} translation of the Current Line and nothing else.2. Use the "Previous Line" strictly to understand context, pronouns, and gender, but DO NOT translate it.3. If the Current Line is incomplete, translate it as an incomplete thought.Previous Line: "{lines[lines.index(line)-1]['text'] if lines.index(line) > 0 else ''}"Current Line: "{line['text']}"next Line: "{lines[lines.index(line)+1]['text'] if lines.index(line) < len(lines)-1 else ''}"{TGT_LANG} translation:"""
-        
+
                             response = GenaiClient.models.generate_content(
                                 model=TRANSLATION_MODEL_NAME,
                                 contents=prompt
@@ -454,6 +455,9 @@ async def transcriber_worker(queue: asyncio.Queue, websocket: WebSocket, VideoLa
                                 print(f"[Debug] Translation sent for line in chunk {chunk_index}")
                         except Exception as e:
                             print(f"[Error] Translation failed for line in chunk {chunk_index}: {e}")
+                            if e["error"]["status"] == "RESOURCE_EXHAUSTED":
+                                retry_after = int(e["error"]["details"][2]["retryDelay"].rstrip("s")) + 1 # add 1 second to be safe
+                                time.sleep(retry_after)
 
                 except Exception as e:
                     print(f"[Error] Failed to process translation for chunk {chunk_index}: {e}")
